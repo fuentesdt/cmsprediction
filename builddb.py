@@ -159,7 +159,7 @@ if (options.initialize ):
 elif (options.builddb ):
   import sqlite3
   tagsconn = sqlite3.connect('datalocation/databaseinfo.sqlite')
-  cursor = tagsconn.execute(' SELECT aq.MRN,aq.StudyDate,aq.StudyUID,aq.SeriesUID, printf("%s/%s/%s/%s", aq.MRN,REPLACE(aq.StudyDate, "-", ""),aq.StudyUID,aq.SeriesUID) UID, aq.SOP, NULL AcquisitionTime FROM cmsdata aq where aq.StudyUID is not NULL;' )
+  cursor = tagsconn.execute(' SELECT aq.MRN,aq.StudyDate,aq.StudyUID,aq.SeriesUID, printf("%s/%s/%s/%s", aq.MRN,REPLACE(aq.StudyDate, "-", ""),aq.StudyUID,aq.SeriesUID) UID, aq.SOP, 91.234 AcquisitionTime FROM cmsdata aq where aq.StudyUID is not NULL;' )
   names = [description[0] for description in cursor.description]
   sqlStudyList = [ dict(zip(names,xtmp)) for xtmp in cursor ]
 
@@ -167,7 +167,10 @@ elif (options.builddb ):
   with open('datalocation/dependencies'  ,'w') as fileHandle:
       fileHandle.write('UIDLIST = %s \n' % " ".join([ data['UID'] for data in sqlStudyList ]))
       for data in sqlStudyList:
-         fileHandle.write('ImageDatabase/%s/Ven.raw.nii.gz:  \n' % (data['UID']) )
+         fileHandle.write("ImageDatabase/%s/Ven.raw.nii.gz: ImageDatabase/%s/raw.xfer: \n\tif [ ! -f ImageDatabase/%s/%s.nii.gz   ] ; then mkdir -p ImageDatabase/%s ;$(DCMNIFTISPLIT) $(subst ImageDatabase,/FUS4/IPVL_research,$(<D)) $(@D)  \'0008|0032\' ; else echo skipping network filesystem; fi\n\tln -snf ./%s/%s.nii.gz $@; touch -h -r $(@D)/%s/%s.nii.gz  $@;\n\tln -snf ./%s/ $(subst .nii.gz,.dir,$@)')\n" % (data['UID'],data['UID'],data['UID'],data['AcquisitionTime'],data['UID'],data['seriesUID'],data['AcquisitionTime'],data['seriesUID'],data['AcquisitionTime'],data['seriesUID']) )
+
+      
+      
 
 
 # SELECT concat_WS('/','/FUS4/IPVL_research',aq.MRN,REPLACE(aq.StudyDate, '-', ''),aq.StudyUID,aq.SeriesUID) dcmpath, aq.SOP FROM cmsdata aq
