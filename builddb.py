@@ -1,72 +1,14 @@
-import sqlite3
-import time
-import dicom
-import subprocess,re,os
-import ConfigParser
 
-def parse_findscu(out):
-    """
-      parse the findscu output
-    """
-    resp=[]
-    res_tags={}
-    tg=re.compile("([0-9a-fA-F]{4}),([0-9a-fA-F]{4})");
-    val=re.compile("\[(.*)\]");
- 
-    for l in out.split('\n'):
-        if l.startswith("E: "):
-            raise RuntimeError
-        if l.startswith("W: "):
-            l=l[3:];
-        
-        # print "|%s|" % l
-    
-        if l.endswith('----'):
-            if not res_tags == {}:
-                resp.append(res_tags)
-            res_tags={}
-            continue
-        
-        s=tg.search(l[1:10])
-        if s is not None:
-           s2=val.search(l[15:]) 
-           if s2 is not None:
-               res_tags[s.group(0)]=s2.group(1).decode('utf8','ignore')
-      
-    resp.append(res_tags) 
-    return resp
-
-####################################################################################################################
 # build data base from CSV file
 def GetDataDictionary():
   import csv
   CSVDictionary = {}
-  with open('adrenal/BlindedACCgreaterthan4cm.csv', 'r') as csvfile:
-      reader = csv.reader(csvfile, delimiter=',')
-      rawaccdata = [row for row in reader]
-  with open('adrenal/BlindedACAgreaterthan4cm.csv', 'r') as csvfile:
-      reader = csv.reader(csvfile, delimiter=',')
-      rawacadata = [row for row in reader]
-  for rawdata in [rawacadata ,rawaccdata]:
-    header = rawdata.pop(0)
-    for row in rawdata:
-      SubjectID  = int(row[ header.index('MRN') ])
-      accession  = int(row[ header.index('accession')   ])
-      sizeinfo   = row[ header.index("size" ) ]
-      CSVDictionary[SubjectID] =  { 'accession':[accession] ,'size':sizeinfo, 'dataid':'adrenal'   }
+  with open('datalocation/cmsdata.csv', 'r') as csvfile:
+    myreader = csv.DictReader(csvfile, delimiter='\t')
+    for row in myreader:
+       CSVDictionary[int( row['MRN'])]  =  row
+  return CSVDictionary
 
-  with open('chemoreponse/initialcases.csv', 'r') as csvfile:
-      reader = csv.reader(csvfile, delimiter=',')
-      rawhccdata = [row for row in reader]
-      for rawdata in [rawhccdata ]:
-        header = rawdata.pop(0)
-        for row in rawdata:
-          SubjectID  = int(row[ header.index('MRN') ])
-          baselineaccession  = int(row[ header.index('baselineaccession')   ])
-          postaccession      = int(row[ header.index('postaccession')   ])
-          CSVDictionary[SubjectID] =  { 'accession':[baselineaccession, postaccession ], 'dataid':'chemo'}
-  
-  return CSVDictionary 
 
 ## Borrowed from
 ## $(SLICER_DIR)/CTK/Libs/DICOM/Core/Resources/dicom-schema.sql
@@ -90,6 +32,8 @@ DROP TABLE IF EXISTS 'Patients' ;
 DROP TABLE IF EXISTS 'Series' ;
 DROP TABLE IF EXISTS 'Studies' ;
 DROP TABLE IF EXISTS 'Directories' ;
+DROP TABLE IF EXISTS 'lstat' ;
+DROP TABLE IF EXISTS 'overlap' ;
 
 CREATE TABLE 'Images' (
  'SOPInstanceUID' VARCHAR(64) NOT NULL,
@@ -129,19 +73,42 @@ CREATE TABLE 'Studies' (
 CREATE TABLE 'Directories' (
  'Dirname' VARCHAR(1024) ,
  PRIMARY KEY ('Dirname') );
+
+CREATE TABLE lstat  (
+   InstanceUID        VARCHAR(255)  NOT NULL,  --  'studyuid *OR* seriesUID'
+   SegmentationID     VARCHAR(80)   NOT NULL,  -- UID for segmentation file 
+   FeatureID          VARCHAR(80)   NOT NULL,  -- UID for image feature     
+   LabelID            INT           NOT NULL,  -- label id for LabelSOPUID statistics of FeatureSOPUID
+   Mean               REAL              NULL,
+   StdD               REAL              NULL,
+   Max                REAL              NULL,
+   Min                REAL              NULL,
+   Count              INT               NULL,
+   Volume             REAL              NULL,
+   ExtentX            INT               NULL,
+   ExtentY            INT               NULL,
+   ExtentZ            INT               NULL,
+   PRIMARY KEY (InstanceUID,SegmentationID,FeatureID,LabelID) );
+
+
+CREATE TABLE overlap(
+   compid             int           NOT NULL,  --   c3d -comp Component ID 
+   InstanceUID        VARCHAR(255)  NOT NULL,  --  'studyuid *OR* seriesUID',  
+   FirstImage         VARCHAR(80)   NOT NULL,  -- UID for  FirstImage  
+   SecondImage        VARCHAR(80)   NOT NULL,  -- UID for  SecondImage 
+   LabelID            INT           NOT NULL,  -- label id for LabelSOPUID statistics of FeatureSOPUID 
+   SegmentationID     VARCHAR(80)   NOT NULL,  -- UID for segmentation file  to join with lstat
+   -- output of c3d firstimage.nii.gz secondimage.nii.gz -overlap LabelID
+   -- Computing overlap #1 and #2
+   -- OVL: 6, 11703, 7362, 4648, 0.487595, 0.322397  
+   MatchingFirst      int           DEFAULT NULL,     --   Matching voxels in first image:  11703
+   MatchingSecond     int           DEFAULT NULL,     --   Matching voxels in second image: 7362
+   SizeOverlap        int           DEFAULT NULL,     --   Size of overlap region:          4648
+   DiceSimilarity     real          DEFAULT NULL,     --   Dice similarity coefficient:     0.487595
+   IntersectionRatio  real          DEFAULT NULL,     --   Intersection / ratio:            0.322397
+   PRIMARY KEY (compid,InstanceUID,FirstImage,SecondImage,LabelID,SegmentationID) );
 """
 
-mrnList = GetDataDictionary()
-#print mrnList
-nsize = len(mrnList )
-
-#FIXME global vars
-configini = ConfigParser.SafeConfigParser({})
-configini.read('./config.ini')
-ip   = configini.get('server','ip'  )
-port = configini.get('server','port')
-aec  = configini.get('server','aec' )
-aet  = configini.get('server','aet' )
 
 
 from optparse import OptionParser
@@ -149,32 +116,64 @@ parser = OptionParser()
 parser.add_option( "--initialize",
                   action="store_true", dest="initialize", default=False,
                   help="build initial sql file ", metavar = "BOOL")
-parser.add_option( "--builddb",
-                  action="store_true", dest="builddb", default=False,
-                  help="build db ", metavar = "BOOL")
+parser.add_option( "--dbfile",
+                  action="store", dest="dbfile", default="datalocation/cmsdata.csv",
+                  help="training data file", metavar="string")
 parser.add_option( "--querydb",
                   action="store_true", dest="querydb", default=False,
                   help="build query commands ", metavar = "BOOL")
 parser.add_option( "--convert",
                   action="store_true", dest="convert", default=False,
                   help="convert dicom to nifti", metavar = "BOOL")
-parser.add_option( "--movescu",
-                  action="store_true", dest="movescu", default=False,
-                  help="build movescu makefile ", metavar = "BOOL")
+parser.add_option( "--builddb",
+                  action="store_true", dest="builddb", default=False,
+                  help="build deps", metavar = "BOOL")
 
 (options, args) = parser.parse_args()
 #############################################################
 # build initial sql file 
 #############################################################
 if (options.initialize ):
+  import sqlite3
+  import pandas
+  import os
+  #import time
+  #import dicom
+  #import subprocess,re,os
+  #import ConfigParser
+
+  # deprecated 
+  #databaseinfo = GetDataDictionary()
+
   # build new database
-  os.system('rm ./pacsquery.sql')
-  tagsconn = sqlite3.connect('./pacsquery.sql')
+  os.system('rm datalocation/databaseinfo.sqlite')
+  tagsconn = sqlite3.connect('datalocation/databaseinfo.sqlite')
   for sqlcmd in initializedb.split(";"):
      tagsconn.execute(sqlcmd )
+  # load csv file
+  df = pandas.read_csv(options.dbfile,delimiter='\t')
+  df.to_sql('cmsdata', tagsconn , if_exists='append', index=False)
 #############################################################
 # build db
 #############################################################
+elif (options.builddb ):
+  import sqlite3
+  tagsconn = sqlite3.connect('datalocation/databaseinfo.sqlite')
+  cursor = tagsconn.execute(' SELECT aq.MRN,aq.StudyDate,aq.StudyUID,aq.SeriesUID, printf("%s/%s/%s/%s", aq.MRN,REPLACE(aq.StudyDate, "-", ""),aq.StudyUID,aq.SeriesUID) UID, aq.SOP, NULL AcquisitionTime FROM cmsdata aq where aq.StudyUID is not NULL;' )
+  names = [description[0] for description in cursor.description]
+  sqlStudyList = [ dict(zip(names,xtmp)) for xtmp in cursor ]
+
+  # build makefile deps
+  with open('datalocation/dependencies'  ,'w') as fileHandle:
+      fileHandle.write('UIDLIST = %s \n' % " ".join([ data['UID'] for data in sqlStudyList ]))
+      for data in sqlStudyList:
+         fileHandle.write('ImageDatabase/%s/Ven.raw.nii.gz:  \n' % (data['UID']) )
+
+
+# SELECT concat_WS('/','/FUS4/IPVL_research',aq.MRN,REPLACE(aq.StudyDate, '-', ''),aq.StudyUID,aq.SeriesUID) dcmpath, aq.SOP FROM cmsdata aq
+
+
+
 elif (options.builddb ):
   tagsconn = sqlite3.connect('./pacsquery.sql')
   cursor = tagsconn.cursor()
@@ -216,7 +215,7 @@ elif (options.builddb ):
     # search for series in study
     for study in  studydictionary:
       studyuidKey = '0020,000d'
-      print "\n study",iddata,nsize,StudyReturnCode,FindStudiesCMD, study
+      print ("\n study",iddata,nsize,StudyReturnCode,FindStudiesCMD, study)
       if studyuidKey in study:
         studyuid = study[studyuidKey ]
         # check for existing study uid
@@ -262,10 +261,10 @@ elif (options.builddb ):
           dhtableentry=(StudyInstanceUID, PatientsUID, StudyDate, StudyTime, AccessionNumber, unicode(SeriesStdOut), unicode(SeriesStdErr.decode('utf8','ignore')), SeriesReturnCode,  FindSeriesCMD, StudyDescription) 
           tagsconn.execute('replace into Studies (StudyInstanceUID, PatientsUID, StudyDate, StudyTime, AccessionNumber, StdOut, StdErr, ReturnCode,  FindSeriesCMD, StudyDescription) values (?,?,?,?,?,?,?,?,?,?);' , dhtableentry)
         else:
-          print "more than one entry ? studyUID should be unique? ", sqlStudyList 
+          print("more than one entry ? studyUID should be unique? ", sqlStudyList )
           raise RuntimeError
         for series  in seriesdictionary:
-          print series 
+          print(series )
           seriesuidKey = '0020,000e'
           if (seriesuidKey in series) :
             seriesuid = series[seriesuidKey]
@@ -288,14 +287,14 @@ elif (options.builddb ):
             elif len(sqlSeriesList ) == 1 :
               pass
             else:
-              print "more than one entry ? seriesUID should be unique? ", seriesuid 
+              print("more than one entry ? seriesUID should be unique? ", seriesuid )
               raise RuntimeError
           #except KeyError as inst:
           else:
-            print "error reading: ", series  ,seriesdictionary
+            print("error reading: ", series  ,seriesdictionary)
             raise RuntimeError
       else:
-        print "?? error reading: study ",study
+        print("?? error reading: study ",study)
         raise RuntimeError
     # commit per patient
     tagsconn.commit()
@@ -327,9 +326,9 @@ elif (options.querydb ):
   for sqlStudyList in  [sqlStudyListChemo ]:
     #Search the series description of data of interest
     querymovescu =  " select * from Series se where se.SeriesDescription not like '%%%%scout%%%%' and  (%s);" % " or  ".join(sqlStudyList)
-    print "querymovescu "
-    print querymovescu 
-    print " "
+    print( "querymovescu "  )
+    print( querymovescu     )
+    print( " "              )
     # search studies for accession number
     queryconvert = """
     select pt.PatientID,se.SeriesInstanceUID,se.SeriesDate,se.SeriesNumber,se.SeriesDescription,se.Modality 
@@ -338,32 +337,9 @@ elif (options.querydb ):
     join Patients pt on st.PatientsUID      = pt.UID 
     where se.SeriesDescription like '%%%%phase%%%%' and  (%s);""" % " or  ".join(sqlStudyList )
 
-    print "queryconvert "
-    print queryconvert 
-    print " "
-#############################################################
-# transfer data
-#############################################################
-elif (options.movescu ):
-  tagsconn = sqlite3.connect('./pacsquery.sql')
-  querymovescu =  configini.get('sql','querymovescu')
-  sqlSeriesList = [ xtmp for xtmp in tagsconn.execute( querymovescu )]
-  nsizeList = len(sqlSeriesList)
-  #print sqlSeriesList,nsizeList 
-  for idseries,(SeriesInstanceUID, StudyInstanceUID, Modality, SeriesDescription, StdOut, StdErr, ReturnCode, MoveSeriesCMD) in enumerate(sqlSeriesList):
-    print idseries, nsizeList ,ReturnCode , Modality, SeriesDescription, MoveSeriesCMD,
-    if ( ReturnCode == 0 ): 
-       print "transfer success!!!\n"  
-    else:
-       print "transfering..." 
-       movechild = subprocess.Popen(MoveSeriesCMD,shell=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-       (moveout,moveerr) = movechild.communicate()
-       # insert return code and output
-       dhtableentry=(SeriesInstanceUID, StudyInstanceUID,  Modality, SeriesDescription ,unicode(moveout),unicode(moveerr),movechild.returncode, MoveSeriesCMD )
-       print dhtableentry
-       tagsconn.execute('replace into Series (SeriesInstanceUID,StudyInstanceUID,Modality,SeriesDescription,StdOut,StdErr,ReturnCode,MoveSeriesCMD) values (?,?,?,?,?,?,?,?);' , dhtableentry)
-       # commit each transfer patient
-       tagsconn.commit()
+    print( "queryconvert " )
+    print( queryconvert    )
+    print( " "             )
 #############################################################
 # convert to nifti
 #############################################################
@@ -384,7 +360,7 @@ elif (options.convert ):
   jobupdatelist  = []
   initialseglist = []
   for idfile,(mrn,accessionnumber,seriesnumber,seriesuid,seriesdesription,modality) in enumerate(sqlSeriesList):
-    print mrn, seriesuid ,idfile,nsizeList , "Slice Thick",
+    print(mrn, seriesuid ,idfile,nsizeList , "Slice Thick",)
     # get files and sort by location
     dicomfilelist = [ "%s" % xtmp[0] for xtmp in slicerdb.execute(" select Filename  from Images where SeriesInstanceUID  =  '%s' " % seriesuid) ]
     orderfilehelper = {}
@@ -392,7 +368,7 @@ elif (options.convert ):
       dcmhelper=dicom.read_file(seriesfile);
       SliceLocation  = dcmhelper.SliceLocation
       SliceThickness = dcmhelper.SliceThickness
-      print SliceThickness, 
+      print(SliceThickness, )
       orderfilehelper[float(SliceLocation )] = seriesfile
     sortdicomfilelist = [ orderfilehelper[location] for location in sorted(orderfilehelper)]
     #print sortdicomfilelist 
@@ -412,14 +388,14 @@ elif (options.convert ):
     seriesdirectory = "/".join(dicomdirectory)
     nameGenerator.SetDirectory( seriesdirectory   ) 
     fileNames = nameGenerator.GetFileNames( seriesuid ) 
-    print seriesdirectory,fileNames 
+    print(seriesdirectory,fileNames )
 
     reader = itk.ImageSeriesReader[ImageType].New()
     dicomIO = itk.GDCMImageIO.New()
     reader.SetImageIO( dicomIO.GetPointer() )
     reader.SetFileNames( fileNames )
     reader.Update( )
-    print "test",seriesuid
+    print("test",seriesuid)
     # get dictionary info
     outfilename =  seriesuid.replace('.','-' ) 
     outfilename =  '%s-%s-%s' % (mrn,accessionnumber,seriesnumber)
@@ -429,7 +405,7 @@ elif (options.convert ):
     #        ''.join(e for e in StudyDescription  if e.isalnum()),\
     #        ''.join(e for e in PatientID         if e.isalnum()),\
     #                           Modality )
-    print "writing:", outfilename, seriesuid ,seriesdesription,modality
+    print("writing:", outfilename, seriesuid ,seriesdesription,modality)
     dbkey.write('%s,%s,%s,%s,%s,%s,%s \n' %  (mrn,accessionnumber, seriesnumber,seriesdesription,seriesuid ,modality,outfilename) )
     niiwriter = itk.ImageFileWriter[ImageType].New()
     niiwriter.SetInput( reader.GetOutput() )
@@ -453,6 +429,6 @@ elif (options.convert ):
   with file('segment.makefile', 'w') as modified: modified.write(  'amiraupdate: %s \n' % ' '.join(jobupdatelist) + 'initial: %s \n' % ' '.join(initialseglist) + datastream)
 else:
   parser.print_help()
-  print options
+  print (options)
 
 
